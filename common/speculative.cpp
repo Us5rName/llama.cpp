@@ -1782,7 +1782,23 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         if(adaptive_length_threshold > 0)
         {
-            LOG_DBG("Adaptive draft predicted %d/%d\n",n_accepted,adaptive_n[seq_id]);
+            if(correct_pred == adaptive_length_threshold)
+            {
+                if(seq_adaptive_n < params.n_max)
+                {
+                    seq_adaptive_n++;
+                }
+                correct_pred = 0;
+            }
+
+            if(wrong_pred == adaptive_length_threshold)
+            {
+                if(seq_adaptive_n > params.n_min)
+                {
+                    seq_adaptive_n--;
+                }
+                wrong_pred = 0;
+            }
 
             if(n_accepted >= seq_adaptive_n - adaptive_length_bias)
             {
@@ -1794,24 +1810,6 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             {
                 wrong_pred++;
                 correct_pred = 0;
-            }
-
-            if(correct_pred == adaptive_length_threshold)
-            {
-                if(seq_adaptive_n < params.n_max)
-                {
-                    seq_adaptive_n++;
-                }
-                correct_pred = 0;
-            }
-
-            else if(wrong_pred == adaptive_length_threshold)
-            {
-                if(seq_adaptive_n > params.n_min)
-                {
-                    seq_adaptive_n--;
-                }
-                wrong_pred = 0;
             }
         }
 
