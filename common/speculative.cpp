@@ -1425,6 +1425,12 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     std::vector<int32_t> correct_preds; // [n_seq] How many times did the target model accept all tokens of the draft per sequence
     std::vector<int32_t> wrong_preds; // [n_seq] How many times did the target model did not accept all tokens of the draft per sequence
     std::vector<int32_t> adaptive_n; // [n_seq] How many tokens should be predicted
+    // 2 bit saturating counter for adaptive length success prediction for each seq_id
+    // 0 - Not taken strong
+    // 1 - Not taken weak
+    // 2 - Taken weak
+    // 3 - taken_strong
+     std::vector<uint8_t> two_bit_counter; // [n_seq] 2 bit saturating counter for adaptive length success prediction for each seq_id
 
     common_speculative_impl_draft_mtp(const common_params_speculative & params, uint32_t n_seq)
         : common_speculative_impl(COMMON_SPECULATIVE_TYPE_DRAFT_MTP, n_seq, params.draft.n_max)
@@ -1509,6 +1515,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         correct_preds.assign(n_seq,0);
         wrong_preds.assign(n_seq,0);
         adaptive_n.assign(n_seq, this->params.n_min);
+        two_bit_counter.assign(n_seq, 0);
     }
 
     ~common_speculative_impl_draft_mtp() override {
@@ -1844,25 +1851,31 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         if(adaptive_length_threshold > 0)
         {
-            if(correct_pred == adaptive_length_threshold)
-            {
-                if(seq_adaptive_n < params.n_max)
-                {
-                    seq_adaptive_n++;
-                }
-                correct_pred = 0;
-            }
 
-            if(wrong_pred == adaptive_length_threshold)
-            {
-                if(seq_adaptive_n > params.n_min)
-                {
-                    seq_adaptive_n--;
-                }
-                wrong_pred = 0;
-            }
+            LOG_DBG(" - seq_id %d, adaptive draft predicted %d/%d\n",seq_id, n_accepted,adaptive_n[seq_id]);
+
+            uint8_t & seq_id_counter = two_bit_counter[seq_id];
 
             if(n_accepted >= seq_adaptive_n - adaptive_length_bias)
+            {
+                if(seq_id_counter < 3)
+                {
+                    seq_id_counter++;
+                }
+            }
+
+            else
+            {
+                if(seq_id_counter > 0)
+                {
+                    seq_id_counter--;
+                }
+            }
+
+            LOG_DBG(" - seq_id %d, adaptive counter is %u\n",seq_id, seq_id_counter);
+
+            //If counter is in one of the taken states
+            if(seq_id_counter > 1)
             {
                 correct_pred++;
                 wrong_pred = 0;
