@@ -1341,6 +1341,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     bool    is_mem_shared = false;   // gemma4
     bool    chain_heads   = false;   // derived in the ctor: n_mtp_layers > 1 && !is_mem_shared
 
+    int32_t adaptive_length_threshold; // Number of consecutive successes (failures) before increasing (decreasing) the size of the draft by one
+    int32_t adaptive_length_bias; // In adaptive length a success is defined as the target model accepting the (full draft - adaptive_length_bias tokens)
+
+
     // Per-sequence cross-batch carryover: pair (h_p, x_{p+1}) at MTP pos p+1.
     // The last h-row of one process() call needs the first token of the NEXT
     // call to pair with, so it's stashed here until that next call fires.
@@ -1356,6 +1360,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
     std::vector<int>                i_last;
     std::vector<std::vector<float>> chain_h;
+    std::vector<int32_t> correct_preds; // [n_seq] How many times did the target model accept all tokens of the draft per sequence
+    std::vector<int32_t> wrong_preds; // [n_seq] How many times did the target model did not accept all tokens of the draft per sequence
+    std::vector<int32_t> adaptive_n; // [n_seq] How many tokens should be predicted
 
     common_speculative_impl_draft_mtp(const common_params_speculative & params, uint32_t n_seq)
         : common_speculative_impl(COMMON_SPECULATIVE_TYPE_DRAFT_MTP, n_seq, params.draft.n_max)
@@ -1433,8 +1440,13 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         i_batch_beg.assign(n_seq, -1);
         i_batch_end.assign(n_seq, -1);
 
+        adaptive_length_threshold = this->params.adaptive_length_threshold;
+        adaptive_length_bias = this->params.adaptive_length_bias;
         verify_h.assign(n_seq, {});
         verify_h_rows.assign(n_seq, 0);
+        correct_preds.assign(n_seq,0);
+        wrong_preds.assign(n_seq,0);
+        adaptive_n.assign(n_seq, this->params.n_min);
     }
 
     ~common_speculative_impl_draft_mtp() override {
@@ -1684,10 +1696,20 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     continue;
                 }
 
-                common_sampler_accept(smpl, id, true);
-
                 auto & dp = dparams.at(seq_id);
                 auto & result = *dp.result;
+
+                if(adaptive_length_threshold > 0)
+                {
+                    //TODO: make the adaptive length work when draft length is 0. The problem is that accept isn't called when the draft is empty, so need to find a way to work around it.
+                    if (adaptive_n[seq_id] <= (int) result.size()) {
+                        drafting[seq_id] = false;
+                        n_drafting--;
+                        continue;
+                    }
+                }
+
+                common_sampler_accept(smpl, id, true);
 
                 result.push_back(id);
 
@@ -1752,6 +1774,45 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         const int32_t n_rows = verify_h_rows[seq_id];
         if (n_rows <= 0) {
             return;
+        }
+
+        int32_t & seq_adaptive_n = adaptive_n[seq_id];
+        int32_t & correct_pred = correct_preds[seq_id];
+        int32_t & wrong_pred = wrong_preds[seq_id];
+
+        if(adaptive_length_threshold > 0)
+        {
+            LOG_DBG("Adaptive draft predicted %d/%d\n",n_accepted,adaptive_n[seq_id]);
+
+            if(n_accepted >= seq_adaptive_n - adaptive_length_bias)
+            {
+                correct_pred++;
+                wrong_pred = 0;
+            }
+
+            else
+            {
+                wrong_pred++;
+                correct_pred = 0;
+            }
+
+            if(correct_pred == adaptive_length_threshold)
+            {
+                if(seq_adaptive_n < params.n_max)
+                {
+                    seq_adaptive_n++;
+                }
+                correct_pred = 0;
+            }
+
+            else if(wrong_pred == adaptive_length_threshold)
+            {
+                if(seq_adaptive_n > params.n_min)
+                {
+                    seq_adaptive_n--;
+                }
+                wrong_pred = 0;
+            }
         }
 
         const int32_t i_h = std::min<int32_t>(n_accepted, n_rows - 1);
