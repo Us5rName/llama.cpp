@@ -1995,42 +1995,65 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             //If counter is in one of the taken states
             if(seq_id_counter > 1)
             {
-                correct_pred++;
-                wrong_pred = 0;
-                if(seq_last_successes < 15)
+                if(correct_pred < adaptive_length_threshold)
                 {
-                    correct_pred = 0;
-                    seq_id_counter = 1;
+                    correct_pred++;
+                }
+                wrong_pred = 0;
+                if(seq_last_successes <= 15)
+                {
+                    correct_pred=0;
+                    // seq_id_counter = 1;
                 }
             }
 
             else
             {
-                wrong_pred++;
-                correct_pred = 0;
-                if(seq_last_failures < 15)
+                if(wrong_pred < adaptive_length_threshold)
                 {
-                     wrong_pred = 0;
-                     seq_id_counter = 2;
+                    wrong_pred++;
+                }
+                correct_pred = 0;
+                if(seq_last_failures <= 15)
+                {
+                     wrong_pred=0;
+                     // seq_id_counter = 2;
                 }
             }
 
-            if(correct_pred == adaptive_length_threshold)
+            if(correct_pred == adaptive_length_threshold && seq_last_successes > 15)
             {
                 if(seq_adaptive_n < params.n_max)
                 {
                     seq_adaptive_n++;
                 }
-                correct_pred = 0;
+                if(seq_adaptive_n != params.n_max)
+                {
+                    correct_pred = 0;
+                    wrong_pred = 0;
+                    seq_id_counter = 1;
+                    seq_id_last_preds.clear();
+                    seq_last_successes = 0;
+                    seq_last_failures = 0;
+                }
+
             }
 
-            else if(wrong_pred == adaptive_length_threshold)
+            else if(wrong_pred == adaptive_length_threshold && seq_last_failures > 15)
             {
                 if(seq_adaptive_n > params.n_min)
                 {
                     seq_adaptive_n--;
                 }
-                wrong_pred = 0;
+                if(seq_adaptive_n != params.n_min)
+                {
+                    correct_pred = 0;
+                    wrong_pred = 0;
+                    seq_id_counter = 1;
+                    seq_id_last_preds.clear();
+                    seq_last_successes = 0;
+                    seq_last_failures = 0;
+                }
             }
         }
 
