@@ -30,6 +30,98 @@
 #define SPEC_VOCAB_MAX_SIZE_DIFFERENCE  128
 #define SPEC_VOCAB_CHECK_START_TOKEN_ID 5
 
+template<typename T>
+struct ring_buffer {
+    ring_buffer(size_t cap) : capacity(cap), data(cap) {}
+
+    T & front() {
+        if (sz == 0) {
+            throw std::runtime_error("ring buffer is empty");
+        }
+        return data[first];
+    }
+
+    const T & front() const {
+        if (sz == 0) {
+            throw std::runtime_error("ring buffer is empty");
+        }
+        return data[first];
+    }
+
+    T & back() {
+        if (sz == 0) {
+            throw std::runtime_error("ring buffer is empty");
+        }
+        return data[pos];
+    }
+
+    const T & back() const {
+        if (sz == 0) {
+            throw std::runtime_error("ring buffer is empty");
+        }
+        return data[pos];
+    }
+
+    void push_back(const T & value) {
+        if (sz == capacity) {
+            // advance the start when buffer is full
+            first = (first + 1) % capacity;
+        } else {
+            sz++;
+        }
+        data[pos] = value;
+        pos = (pos + 1) % capacity;
+    }
+
+    T pop_front() {
+        if (sz == 0) {
+            throw std::runtime_error("ring buffer is empty");
+        }
+        T value = data[first];
+        first = (first + 1) % capacity;
+        sz--;
+        return value;
+    }
+
+    const T & rat(size_t i) const {
+        if (i >= sz) {
+            throw std::runtime_error("ring buffer: index out of bounds");
+        }
+        return data[(first + sz - i - 1) % capacity];
+    }
+
+    std::vector<T> to_vector() const {
+        std::vector<T> result;
+        result.reserve(sz);
+        for (size_t i = 0; i < sz; i++) {
+            result.push_back(data[(first + i) % capacity]);
+        }
+        return result;
+    }
+
+    void clear() {
+        // here only reset the status of the buffer
+        sz = 0;
+        first = 0;
+        pos = 0;
+    }
+
+    bool empty() const {
+        return sz == 0;
+    }
+
+    size_t size() const {
+        return sz;
+    }
+
+    size_t capacity = 0;
+    size_t sz = 0;
+    size_t first = 0;
+    size_t pos = 0;
+    std::vector<T> data;
+};
+
+
 const std::map<std::string, common_speculative_type> common_speculative_type_from_name_map = {
     {"none",          COMMON_SPECULATIVE_TYPE_NONE},
     {"draft-simple",  COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE},
@@ -1431,6 +1523,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     // 2 - Taken weak
     // 3 - taken_strong
      std::vector<uint8_t> two_bit_counter; // [n_seq] 2 bit saturating counter for adaptive length success prediction for each seq_id
+     std::vector<ring_buffer<int>> last_accepted; // [n_seq] saves the last 20 successes/failures
+     std::vector<int32_t> last_successes; // [n_seq] How many times the target model accepted all tokens of the draft per sequence last 20
+     std::vector<int32_t> last_failures; // [n_seq] How many times did the target model not accept all tokens of the draft per sequence last 20
 
     common_speculative_impl_draft_mtp(const common_params_speculative & params, uint32_t n_seq)
         : common_speculative_impl(COMMON_SPECULATIVE_TYPE_DRAFT_MTP, n_seq, params.draft.n_max)
@@ -1516,6 +1611,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         wrong_preds.assign(n_seq,0);
         adaptive_n.assign(n_seq, this->params.n_min);
         two_bit_counter.assign(n_seq, 0);
+        last_accepted.assign(n_seq, ring_buffer<int>(20));
+        last_failures.assign(n_seq, 0);
+        last_successes.assign(n_seq, 0);
     }
 
     ~common_speculative_impl_draft_mtp() override {
@@ -1855,9 +1953,26 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             LOG_DBG(" - seq_id %d, adaptive draft predicted %d/%d\n",seq_id, n_accepted,adaptive_n[seq_id]);
 
             uint8_t & seq_id_counter = two_bit_counter[seq_id];
+            ring_buffer<int> & seq_id_last_preds = last_accepted[seq_id];
+            int & seq_last_successes = last_successes[seq_id];
+            int & seq_last_failures = last_failures[seq_id];
+
+            if (seq_id_last_preds.size() >= 20) {
+                   const auto old = seq_id_last_preds.front();
+                   if(old == 0)
+                   {
+                       seq_last_failures--;
+                   }
+                   else
+                   {
+                       seq_last_successes--;
+                   }
+            }
 
             if(n_accepted >= seq_adaptive_n - adaptive_length_bias)
             {
+                seq_id_last_preds.push_back(1);
+                seq_last_successes++;
                 if(seq_id_counter < 3)
                 {
                     seq_id_counter++;
@@ -1866,12 +1981,15 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
             else
             {
+                seq_id_last_preds.push_back(0);
+                seq_last_failures++;
                 if(seq_id_counter > 0)
                 {
                     seq_id_counter--;
                 }
             }
 
+            LOG_DBG(" - seq_id %d, adaptive successs/failures %d/%d\n",seq_id, seq_last_successes,seq_last_failures);
             LOG_DBG(" - seq_id %d, adaptive counter is %u\n",seq_id, seq_id_counter);
 
             //If counter is in one of the taken states
@@ -1879,12 +1997,22 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             {
                 correct_pred++;
                 wrong_pred = 0;
+                if(seq_last_successes < 15)
+                {
+                    correct_pred = 0;
+                    seq_id_counter = 1;
+                }
             }
 
             else
             {
                 wrong_pred++;
                 correct_pred = 0;
+                if(seq_last_failures < 15)
+                {
+                     wrong_pred = 0;
+                     seq_id_counter = 2;
+                }
             }
 
             if(correct_pred == adaptive_length_threshold)
