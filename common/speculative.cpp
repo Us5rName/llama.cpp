@@ -1522,7 +1522,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     // 1 - Not taken weak
     // 2 - Taken weak
     // 3 - taken_strong
-     std::vector<uint8_t> two_bit_counter; // [n_seq] 2 bit saturating counter for adaptive length success prediction for each seq_id
+     // std::vector<uint8_t> two_bit_counter; // [n_seq] 2 bit saturating counter for adaptive length success prediction for each seq_id
      std::vector<ring_buffer<int>> last_accepted; // [n_seq] saves the last 20 successes/failures
      std::vector<int32_t> last_successes; // [n_seq] How many times the target model accepted all tokens of the draft per sequence last 20
      std::vector<int32_t> last_failures; // [n_seq] How many times did the target model not accept all tokens of the draft per sequence last 20
@@ -1613,7 +1613,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         correct_preds.assign(n_seq,0);
         wrong_preds.assign(n_seq,0);
         adaptive_n.assign(n_seq, this->params.n_min);
-        two_bit_counter.assign(n_seq, 0);
+        // two_bit_counter.assign(n_seq, 0);
         last_accepted.assign(n_seq, ring_buffer<int>(adaptive_history_length));
         last_failures.assign(n_seq, 0);
         last_successes.assign(n_seq, 0);
@@ -1960,11 +1960,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             if(heuristic_token_counter > -1)
             {
                 heuristic_token_counter += seq_adaptive_n;
-            }
 
-            if(heuristic_token_counter >= heuristic_variance_limit)
-            {
-                heuristic_token_counter = -1; //Indicate that the draft length is allowed to change.
+                if(heuristic_token_counter >= heuristic_variance_limit)
+                {
+                    heuristic_token_counter = -1; //Indicate that the draft length is allowed to change.
+                }
             }
 
             int32_t rolling_counter_positive_zone = 24; // Potentially increase draft length when successes > rolling_counter_positive_zone
@@ -1972,7 +1972,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
             LOG_DBG(" - seq_id %d, adaptive draft predicted %d/%d\n",seq_id, n_accepted,adaptive_n[seq_id]);
 
-            uint8_t & seq_id_counter = two_bit_counter[seq_id];
+            // uint8_t & seq_id_counter = two_bit_counter[seq_id];
             ring_buffer<int> & seq_id_last_preds = last_accepted[seq_id];
             int & seq_last_successes = last_successes[seq_id];
             int & seq_last_failures = last_failures[seq_id];
@@ -2011,7 +2011,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
             if(in_positive_zone)
             {
-                seq_id_counter = 3;
+                // seq_id_counter = 3;
                 if(correct_pred < adaptive_length_threshold)
                 {
                     correct_pred++;
@@ -2020,7 +2020,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             }
             else if(in_negative_zone)
             {
-                seq_id_counter = 0;
+                // seq_id_counter = 0;
                 if(wrong_pred < adaptive_length_threshold)
                 {
                     wrong_pred++;
@@ -2029,14 +2029,15 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             }
             else
             {
-                seq_id_counter = 1;
+                // seq_id_counter = 1;
                 correct_pred = 0;
                 wrong_pred = 0;
             }
 
             LOG_DBG(" - seq_id %d, adaptive successs/failures %d/%d\n",seq_id, seq_last_successes,seq_last_failures);
-            LOG_DBG(" - seq_id %d, adaptive counter is %u\n",seq_id, seq_id_counter);
+            // LOG_DBG(" - seq_id %d, adaptive counter is %u\n",seq_id, seq_id_counter);
 
+            // Only allowed to change draft lenght after "cooldown"
             if (heuristic_token_counter == -1)
             {
                 if(correct_pred == adaptive_length_threshold)
@@ -2046,7 +2047,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                         seq_adaptive_n++;
                         correct_pred = 0;
                         wrong_pred = 0;
-                        seq_id_counter = 1;
+                        // seq_id_counter = 1;
                         seq_id_last_preds.clear();
                         seq_last_successes = 0;
                         seq_last_failures = 0;
@@ -2061,13 +2062,18 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                         seq_adaptive_n--;
                         correct_pred = 0;
                         wrong_pred = 0;
-                        seq_id_counter = 1;
+                        // seq_id_counter = 1;
                         seq_id_last_preds.clear();
                         seq_last_successes = 0;
                         seq_last_failures = 0;
                         heuristic_token_counter = 0; //Start counting again before increasing the draft length.
                     }
                 }
+            }
+
+            else
+            {
+                LOG_DBG(" - seq_id %d, adaptive length allowed to change in %d tokens\n",seq_id, (heuristic_variance_limit - heuristic_token_counter));
             }
 
 
