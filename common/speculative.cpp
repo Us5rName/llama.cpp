@@ -1152,7 +1152,6 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
         llama_set_causal_attn(ctx_dft, false); // DFlash needs non-causal attention
 
-
         adaptive_length_threshold = this->params.adaptive_length_threshold;
         adaptive_length_bias = this->params.adaptive_length_bias;
         correct_preds.assign(n_seq,0);
@@ -1497,6 +1496,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
     int32_t adaptive_length_threshold; // Number of consecutive successes (failures) before increasing (decreasing) the size of the draft by one
     int32_t adaptive_length_bias; // In adaptive length a success is defined as the target model accepting the (full draft - adaptive_length_bias tokens)
+    size_t adaptive_history_length; // How many drafts to remember for the heuristic
 
 
     // Per-sequence cross-batch carryover: pair (h_p, x_{p+1}) at MTP pos p+1.
@@ -1603,6 +1603,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         i_batch_beg.assign(n_seq, -1);
         i_batch_end.assign(n_seq, -1);
 
+        adaptive_history_length = 30;
         adaptive_length_threshold = this->params.adaptive_length_threshold;
         adaptive_length_bias = this->params.adaptive_length_bias;
         verify_h.assign(n_seq, {});
@@ -1611,7 +1612,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         wrong_preds.assign(n_seq,0);
         adaptive_n.assign(n_seq, this->params.n_min);
         two_bit_counter.assign(n_seq, 0);
-        last_accepted.assign(n_seq, ring_buffer<int>(20));
+        last_accepted.assign(n_seq, ring_buffer<int>(adaptive_history_length));
         last_failures.assign(n_seq, 0);
         last_successes.assign(n_seq, 0);
     }
@@ -1949,6 +1950,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         if(adaptive_length_threshold > 0)
         {
+            int32_t rolling_counter_positive_zone = 24; // Potentially increase draft length when successes > rolling_counter_positive_zone
+            int32_t rolling_counter_negative_zone = 12; // Potentially decrease draft length when successes < rolling_counter_negative_zone
 
             LOG_DBG(" - seq_id %d, adaptive draft predicted %d/%d\n",seq_id, n_accepted,adaptive_n[seq_id]);
 
@@ -1956,8 +1959,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             ring_buffer<int> & seq_id_last_preds = last_accepted[seq_id];
             int & seq_last_successes = last_successes[seq_id];
             int & seq_last_failures = last_failures[seq_id];
+            int32_t seq_last_successes_comp = adaptive_history_length-seq_last_failures; //complementary to number of successes
 
-            if (seq_id_last_preds.size() >= 20) {
+            if (seq_id_last_preds.size() >= (size_t)adaptive_history_length) {
                    const auto old = seq_id_last_preds.front();
                    if(old == 0)
                    {
@@ -1973,21 +1977,41 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             {
                 seq_id_last_preds.push_back(1);
                 seq_last_successes++;
-                if(seq_id_counter < 3)
-                {
-                    seq_id_counter++;
-                }
+
             }
 
             else
             {
                 seq_id_last_preds.push_back(0);
                 seq_last_failures++;
-                if(seq_id_counter > 0)
-                {
-                    seq_id_counter--;
-                }
             }
+
+            if(seq_id_counter < 3  && seq_last_successes > rolling_counter_positive_zone)
+            {
+                seq_id_counter++;
+            }
+
+            else if(seq_id_counter > 0  && seq_last_successes_comp < rolling_counter_negative_zone)
+            {
+                seq_id_counter--;
+            }
+
+            if(seq_last_successes == rolling_counter_positive_zone)
+            {
+                seq_id_counter = 2;
+            }
+
+            if(seq_last_successes_comp == rolling_counter_negative_zone)
+            {
+                seq_id_counter = 1;
+            }
+
+            //Neutral zone
+            if(seq_last_successes < rolling_counter_positive_zone && seq_last_successes_comp > rolling_counter_negative_zone)
+            {
+                seq_id_counter = 1;
+            }
+
 
             LOG_DBG(" - seq_id %d, adaptive successs/failures %d/%d\n",seq_id, seq_last_successes,seq_last_failures);
             LOG_DBG(" - seq_id %d, adaptive counter is %u\n",seq_id, seq_id_counter);
@@ -2000,11 +2024,6 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     correct_pred++;
                 }
                 wrong_pred = 0;
-                if(seq_last_successes <= 15)
-                {
-                    correct_pred=0;
-                    // seq_id_counter = 1;
-                }
             }
 
             else
@@ -2014,19 +2033,17 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     wrong_pred++;
                 }
                 correct_pred = 0;
-                if(seq_last_failures <= 15)
-                {
-                     wrong_pred=0;
-                     // seq_id_counter = 2;
-                }
             }
 
-            if(correct_pred == adaptive_length_threshold && seq_last_successes > 15)
+            //Neutral zone
+            if(seq_last_successes < rolling_counter_positive_zone && seq_last_successes_comp > rolling_counter_negative_zone)
             {
-                if(seq_adaptive_n < params.n_max)
-                {
-                    seq_adaptive_n++;
-                }
+                correct_pred = 0;
+                wrong_pred = 0;
+            }
+
+            if(correct_pred == adaptive_length_threshold)
+            {
                 if(seq_adaptive_n != params.n_max)
                 {
                     correct_pred = 0;
@@ -2037,14 +2054,14 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     seq_last_failures = 0;
                 }
 
+                if(seq_adaptive_n < params.n_max)
+                {
+                    seq_adaptive_n++;
+                }
             }
 
-            else if(wrong_pred == adaptive_length_threshold && seq_last_failures > 15)
+            else if(wrong_pred == adaptive_length_threshold)
             {
-                if(seq_adaptive_n > params.n_min)
-                {
-                    seq_adaptive_n--;
-                }
                 if(seq_adaptive_n != params.n_min)
                 {
                     correct_pred = 0;
@@ -2053,6 +2070,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     seq_id_last_preds.clear();
                     seq_last_successes = 0;
                     seq_last_failures = 0;
+                }
+
+                if(seq_adaptive_n > params.n_min)
+                {
+                    seq_adaptive_n--;
                 }
             }
         }
