@@ -1497,7 +1497,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     int32_t adaptive_length_threshold; // Number of consecutive successes (failures) before increasing (decreasing) the size of the draft by one
     int32_t adaptive_length_bias; // In adaptive length a success is defined as the target model accepting the (full draft - adaptive_length_bias tokens)
     size_t adaptive_history_length; // How many drafts to remember for the heuristic
-
+    int32_t heuristic_variance_limit; // How many tokens must be generated before changing the draft size to avoid gpu thrashing
 
     // Per-sequence cross-batch carryover: pair (h_p, x_{p+1}) at MTP pos p+1.
     // The last h-row of one process() call needs the first token of the NEXT
@@ -1526,6 +1526,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
      std::vector<ring_buffer<int>> last_accepted; // [n_seq] saves the last 20 successes/failures
      std::vector<int32_t> last_successes; // [n_seq] How many times the target model accepted all tokens of the draft per sequence last 20
      std::vector<int32_t> last_failures; // [n_seq] How many times did the target model not accept all tokens of the draft per sequence last 20
+     std::vector<int32_t> heuristic_token_counters; // [n_seq] How many tokens were generated from the last token reset, per seq_id
 
     common_speculative_impl_draft_mtp(const common_params_speculative & params, uint32_t n_seq)
         : common_speculative_impl(COMMON_SPECULATIVE_TYPE_DRAFT_MTP, n_seq, params.draft.n_max)
@@ -1604,6 +1605,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         i_batch_end.assign(n_seq, -1);
 
         adaptive_history_length = 30;
+        heuristic_variance_limit = 70;
         adaptive_length_threshold = this->params.adaptive_length_threshold;
         adaptive_length_bias = this->params.adaptive_length_bias;
         verify_h.assign(n_seq, {});
@@ -1615,6 +1617,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         last_accepted.assign(n_seq, ring_buffer<int>(adaptive_history_length));
         last_failures.assign(n_seq, 0);
         last_successes.assign(n_seq, 0);
+        heuristic_token_counters.assign(n_seq, 0);
     }
 
     ~common_speculative_impl_draft_mtp() override {
@@ -1864,8 +1867,12 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     continue;
                 }
 
+                common_sampler_accept(smpl, id, true);
+
                 auto & dp = dparams.at(seq_id);
                 auto & result = *dp.result;
+
+                result.push_back(id);
 
                 if(adaptive_length_threshold > 0)
                 {
@@ -1876,10 +1883,6 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                         continue;
                     }
                 }
-
-                common_sampler_accept(smpl, id, true);
-
-                result.push_back(id);
 
                 if (params.n_max <= (int) result.size()) {
                     drafting[seq_id] = false;
@@ -1944,14 +1947,28 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             return;
         }
 
-        int32_t & seq_adaptive_n = adaptive_n[seq_id];
-        int32_t & correct_pred = correct_preds[seq_id];
-        int32_t & wrong_pred = wrong_preds[seq_id];
+
 
         if(adaptive_length_threshold > 0)
         {
+
+            int32_t & seq_adaptive_n = adaptive_n[seq_id];
+            int32_t & correct_pred = correct_preds[seq_id];
+            int32_t & wrong_pred = wrong_preds[seq_id];
+            int32_t & heuristic_token_counter = heuristic_token_counters[seq_id];
+
+            if(heuristic_token_counter > -1)
+            {
+                heuristic_token_counter += seq_adaptive_n;
+            }
+
+            if(heuristic_token_counter >= heuristic_variance_limit)
+            {
+                heuristic_token_counter = -1; //Indicate that the draft length is allowed to change.
+            }
+
             int32_t rolling_counter_positive_zone = 24; // Potentially increase draft length when successes > rolling_counter_positive_zone
-            int32_t rolling_counter_negative_zone = 12; // Potentially decrease draft length when successes < rolling_counter_negative_zone
+            int32_t rolling_counter_negative_zone = 10; // Potentially decrease draft length when successes < rolling_counter_negative_zone
 
             LOG_DBG(" - seq_id %d, adaptive draft predicted %d/%d\n",seq_id, n_accepted,adaptive_n[seq_id]);
 
@@ -1959,7 +1976,6 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             ring_buffer<int> & seq_id_last_preds = last_accepted[seq_id];
             int & seq_last_successes = last_successes[seq_id];
             int & seq_last_failures = last_failures[seq_id];
-            int32_t seq_last_successes_comp = adaptive_history_length-seq_last_failures; //complementary to number of successes
 
             if (seq_id_last_preds.size() >= (size_t)adaptive_history_length) {
                    const auto old = seq_id_last_preds.front();
@@ -1972,6 +1988,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                        seq_last_successes--;
                    }
             }
+
+            //bool rolling_counter_in_neutral_zone = (seq_last_successes < rolling_counter_positive_zone)&&(seq_last_successes_comp > rolling_counter_negative_zone);
 
             if(n_accepted >= seq_adaptive_n - adaptive_length_bias)
             {
@@ -1986,97 +2004,73 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 seq_last_failures++;
             }
 
-            if(seq_id_counter < 3  && seq_last_successes > rolling_counter_positive_zone)
+            int32_t seq_last_successes_comp = adaptive_history_length - seq_last_failures;
+
+            bool in_positive_zone = seq_last_successes >= rolling_counter_positive_zone;
+            bool in_negative_zone = seq_last_successes_comp <= rolling_counter_negative_zone;
+
+            if(in_positive_zone)
             {
-                seq_id_counter++;
-            }
-
-            else if(seq_id_counter > 0  && seq_last_successes_comp < rolling_counter_negative_zone)
-            {
-                seq_id_counter--;
-            }
-
-            if(seq_last_successes == rolling_counter_positive_zone)
-            {
-                seq_id_counter = 2;
-            }
-
-            if(seq_last_successes_comp == rolling_counter_negative_zone)
-            {
-                seq_id_counter = 1;
-            }
-
-            //Neutral zone
-            if(seq_last_successes < rolling_counter_positive_zone && seq_last_successes_comp > rolling_counter_negative_zone)
-            {
-                seq_id_counter = 1;
-            }
-
-
-            LOG_DBG(" - seq_id %d, adaptive successs/failures %d/%d\n",seq_id, seq_last_successes,seq_last_failures);
-            LOG_DBG(" - seq_id %d, adaptive counter is %u\n",seq_id, seq_id_counter);
-
-            //If counter is in one of the taken states
-            if(seq_id_counter > 1)
-            {
+                seq_id_counter = 3;
                 if(correct_pred < adaptive_length_threshold)
                 {
                     correct_pred++;
                 }
                 wrong_pred = 0;
             }
-
-            else
+            else if(in_negative_zone)
             {
+                seq_id_counter = 0;
                 if(wrong_pred < adaptive_length_threshold)
                 {
                     wrong_pred++;
                 }
                 correct_pred = 0;
             }
-
-            //Neutral zone
-            if(seq_last_successes < rolling_counter_positive_zone && seq_last_successes_comp > rolling_counter_negative_zone)
+            else
             {
+                seq_id_counter = 1;
                 correct_pred = 0;
                 wrong_pred = 0;
             }
 
-            if(correct_pred == adaptive_length_threshold)
+            LOG_DBG(" - seq_id %d, adaptive successs/failures %d/%d\n",seq_id, seq_last_successes,seq_last_failures);
+            LOG_DBG(" - seq_id %d, adaptive counter is %u\n",seq_id, seq_id_counter);
+
+            if (heuristic_token_counter == -1)
             {
-                if(seq_adaptive_n != params.n_max)
+                if(correct_pred == adaptive_length_threshold)
                 {
-                    correct_pred = 0;
-                    wrong_pred = 0;
-                    seq_id_counter = 1;
-                    seq_id_last_preds.clear();
-                    seq_last_successes = 0;
-                    seq_last_failures = 0;
+                    if(seq_adaptive_n < params.n_max)
+                    {
+                        seq_adaptive_n++;
+                        correct_pred = 0;
+                        wrong_pred = 0;
+                        seq_id_counter = 1;
+                        seq_id_last_preds.clear();
+                        seq_last_successes = 0;
+                        seq_last_failures = 0;
+                        heuristic_token_counter = 0; //Start counting again before increasing the draft length.
+                    }
                 }
 
-                if(seq_adaptive_n < params.n_max)
+                else if(wrong_pred == adaptive_length_threshold)
                 {
-                    seq_adaptive_n++;
+                    if(seq_adaptive_n > params.n_min)
+                    {
+                        seq_adaptive_n--;
+                        correct_pred = 0;
+                        wrong_pred = 0;
+                        seq_id_counter = 1;
+                        seq_id_last_preds.clear();
+                        seq_last_successes = 0;
+                        seq_last_failures = 0;
+                        heuristic_token_counter = 0; //Start counting again before increasing the draft length.
+                    }
                 }
             }
 
-            else if(wrong_pred == adaptive_length_threshold)
-            {
-                if(seq_adaptive_n != params.n_min)
-                {
-                    correct_pred = 0;
-                    wrong_pred = 0;
-                    seq_id_counter = 1;
-                    seq_id_last_preds.clear();
-                    seq_last_successes = 0;
-                    seq_last_failures = 0;
-                }
 
-                if(seq_adaptive_n > params.n_min)
-                {
-                    seq_adaptive_n--;
-                }
-            }
         }
 
         const int32_t i_h = std::min<int32_t>(n_accepted, n_rows - 1);
