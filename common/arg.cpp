@@ -4212,14 +4212,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_P_MIN"));
     add_opt(common_arg(
         {"--spec-draft-adaptive-length-threshold"}, "N",
-        string_format("minimum consecutive times in positive/negative zone before increasing/decreasing draft length by one, bounded by n-max/n-min. Set to 0 to disable adaptive length (default: %d)", (int)params.speculative.draft.adaptive_length_threshold),
+        string_format("minimum consecutive times in positive/negative zone before increasing/decreasing draft length by one, up to n-max/n-min. Set to 0 to disable adaptive length (default: %d)", (int)params.speculative.draft.adaptive_length_threshold),
         [](common_params & params, int value) {
             params.speculative.draft.adaptive_length_threshold = value;
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_ADAPTIVE_LENGTH_THRESHOLD"));
     add_opt(common_arg(
         {"--spec-draft-adaptive-length-bias"}, "N",
-        string_format("success tolerance for adaptive length heuristic. A draft is a success if target model accepts at least (draft_length - N) tokens and a failure otherwise (default: %d)", (int)params.speculative.draft.adaptive_length_bias),
+        string_format("success tolerance for adaptive length heuristic. A draft is a success if target model accepts at least (draft_length - N) tokens and a draft is a failure otherwise (default: %d)", (int)params.speculative.draft.adaptive_length_bias),
         [](common_params & params, int value) {
             params.speculative.draft.adaptive_length_bias = value;
         }
@@ -4256,9 +4256,9 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         {"--spec-draft-adaptive-length-default"},
         string_format("enable adaptive draft length heuristic with default settings"),
         [](common_params & params) {
-            params.speculative.draft.adaptive_length_threshold = 14;
+            params.speculative.draft.adaptive_length_threshold = 12;
             params.speculative.draft.adaptive_length_bias = 0;
-            params.speculative.draft.adaptive_length_positive_zone = 24;
+            params.speculative.draft.adaptive_length_positive_zone = 22;
             params.speculative.draft.adaptive_length_negative_zone = 20;
             params.speculative.draft.adaptive_length_variance_limit = 70;
             params.speculative.draft.adaptive_history_length = 30;
