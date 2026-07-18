@@ -4212,18 +4212,58 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_P_MIN"));
     add_opt(common_arg(
         {"--spec-draft-adaptive-length-threshold"}, "N",
-        string_format("minimum consecutive successes/failues before increasing/decreasing the size of the generated draft by one. Doesn't go past draft-n-max/draft-n-min. Set to 0 to disable (default: %d)", (int)params.speculative.draft.adaptive_length_threshold),
+        string_format("minimum consecutive times in positive/negative zone before increasing/decreasing draft length by one, bounded by n-max/n-min. Set to 0 to disable adaptive length (default: %d)", (int)params.speculative.draft.adaptive_length_threshold),
         [](common_params & params, int value) {
             params.speculative.draft.adaptive_length_threshold = value;
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_ADAPTIVE_LENGTH_THRESHOLD"));
     add_opt(common_arg(
         {"--spec-draft-adaptive-length-bias"}, "N",
-        string_format("In adaptive length a success is defined as the target model accepting the full draft - N tokens (default: %d)", (int)params.speculative.draft.adaptive_length_threshold),
+        string_format("success tolerance for adaptive length heuristic. A draft is a success if target model accepts at least (draft_length - N) tokens and a failure otherwise (default: %d)", (int)params.speculative.draft.adaptive_length_bias),
         [](common_params & params, int value) {
             params.speculative.draft.adaptive_length_bias = value;
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_ADAPTIVE_LENGTH_BIAS"));
+    add_opt(common_arg(
+        {"--spec-draft-adaptive-length-hist-size"}, "N",
+        string_format("store a rolling history of the success/failure status of the last N drafts. Used to determine the current zone of the adaptive length heuristic (default: %d)", (int)params.speculative.draft.adaptive_history_length),
+        [](common_params & params, int value) {
+            params.speculative.draft.adaptive_history_length = value;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_ADAPTIVE_LENGTH_HISTORY"));
+    add_opt(common_arg(
+        {"--spec-draft-adaptive-length-positive-boundry"}, "N",
+        string_format("when the rolling history contains N or more successs the heuristic is in the positive zone (default: %d)", (int)params.speculative.draft.adaptive_length_positive_zone),
+        [](common_params & params, int value) {
+            params.speculative.draft.adaptive_length_positive_zone = value;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_ADAPTIVE_LENGTH_POSITIVE_ZONE"));
+    add_opt(common_arg(
+        {"--spec-draft-adaptive-length-negative-boundry"}, "N",
+        string_format("when the rolling history contains N or more failures the heuristic is in the negative zone (Must be set to at least hist-size minus positive-boundry) (default: %d)", (int)params.speculative.draft.adaptive_length_negative_zone),
+        [](common_params & params, int value) {
+            params.speculative.draft.adaptive_length_negative_zone = value;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_ADAPTIVE_LENGTH_NEGATIVE_ZONE"));
+    add_opt(common_arg(
+        {"--spec-draft-adaptive-length-cooldown"}, "N",
+        string_format("minimum draft tokens to generate until the draft length is allowed to change again (default: %d)", (int)params.speculative.draft.adaptive_length_variance_limit),
+        [](common_params & params, int value) {
+            params.speculative.draft.adaptive_length_variance_limit = value;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_ADAPTIVE_LENGTH_VARIANCE_LIMIT"));
+    add_opt(common_arg(
+        {"--spec-draft-adaptive-length-default"},
+        string_format("enable adaptive draft length heuristic with default settings"),
+        [](common_params & params) {
+            params.speculative.draft.adaptive_length_threshold = 14;
+            params.speculative.draft.adaptive_length_bias = 0;
+            params.speculative.draft.adaptive_length_positive_zone = 24;
+            params.speculative.draft.adaptive_length_negative_zone = 20;
+            params.speculative.draft.adaptive_length_variance_limit = 70;
+            params.speculative.draft.adaptive_history_length = 30;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
         {"--spec-draft-backend-sampling"},
         {"--no-spec-draft-backend-sampling"},

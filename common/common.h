@@ -328,8 +328,12 @@ struct common_params_speculative_draft {
 
     float p_split = 0.1f; // speculative decoding split probability
     float p_min   = 0.0f; // minimum speculative decoding probability (greedy)
-    int32_t adaptive_length_threshold = 0; // Number of consecutive successes (failures) before increasing (decreasing) the size of the draft by one
-    int32_t adaptive_length_bias = 0; // Number of consecutive successes (failures) before increasing (decreasing) the size of the draft by one
+    int32_t adaptive_length_threshold      = 0; // Number of consecutive evaluations in positive/negative zone before changing draft length by one (bounded by n-min/n-max). Set to 0 to disable adaptive length
+    int32_t adaptive_length_bias           = 0; // How forgiving the success definition is. A draft is "successful" if target accepts at least (draft_length - bias) tokens
+    int32_t adaptive_length_positive_zone = 24; // Minimum successes in rolling window to enter positive zone (consider increasing draft)
+    int32_t adaptive_length_negative_zone = 20; // Minimum failures in window to enter negative zone (consider decreasing draft)
+    int32_t adaptive_length_variance_limit = 0; // Minimum tokens between draft length changes
+    size_t adaptive_history_length        = 30; // Number of past draft attempts tracked in the rolling window
 
     bool backend_sampling = true; // offload draft sampling to the backend (default: on)
 

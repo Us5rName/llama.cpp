@@ -1604,8 +1604,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         i_batch_beg.assign(n_seq, -1);
         i_batch_end.assign(n_seq, -1);
 
-        adaptive_history_length = 30;
-        heuristic_variance_limit = 70;
+        adaptive_history_length = this->params.adaptive_history_length;
+        heuristic_variance_limit = this->params.adaptive_length_variance_limit;
         adaptive_length_threshold = this->params.adaptive_length_threshold;
         adaptive_length_bias = this->params.adaptive_length_bias;
         verify_h.assign(n_seq, {});
@@ -1948,7 +1948,6 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         }
 
 
-
         if(adaptive_length_threshold > 0)
         {
 
@@ -1967,8 +1966,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 }
             }
 
-            int32_t rolling_counter_positive_zone = 24; // Potentially increase draft length when successes > rolling_counter_positive_zone
-            int32_t rolling_counter_negative_zone = 10; // Potentially decrease draft length when successes < rolling_counter_negative_zone
+            int32_t rolling_counter_positive_zone = this->params.adaptive_length_positive_zone;
+            int32_t rolling_counter_negative_zone = this->params.adaptive_length_negative_zone;
 
             LOG_DBG(" - seq_id %d, adaptive draft predicted %d/%d\n",seq_id, n_accepted,adaptive_n[seq_id]);
 
@@ -2004,10 +2003,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 seq_last_failures++;
             }
 
-            int32_t seq_last_successes_comp = adaptive_history_length - seq_last_failures;
-
             bool in_positive_zone = seq_last_successes >= rolling_counter_positive_zone;
-            bool in_negative_zone = seq_last_successes_comp <= rolling_counter_negative_zone;
+            bool in_negative_zone = seq_last_failures >= rolling_counter_negative_zone;
 
             if(in_positive_zone)
             {
@@ -2017,6 +2014,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     correct_pred++;
                 }
                 wrong_pred = 0;
+                LOG_DBG(" - seq_id %d, adaptive conscutives successes %d\n",seq_id, correct_pred);
             }
             else if(in_negative_zone)
             {
@@ -2026,6 +2024,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     wrong_pred++;
                 }
                 correct_pred = 0;
+                LOG_DBG(" - seq_id %d, adaptive conscutives failures %d\n",seq_id, wrong_pred);
             }
             else
             {
