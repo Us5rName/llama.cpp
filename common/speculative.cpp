@@ -1035,10 +1035,16 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
     int32_t adaptive_length_threshold; // Number of consecutive successes (failures) before increasing (decreasing) the size of the draft by one
     int32_t adaptive_length_bias; // In adaptive length a success is defined as the target model accepting the (full draft - adaptive_length_bias tokens)
+    size_t adaptive_history_length; // How many drafts to remember for the heuristic
+    int32_t heuristic_variance_limit; // How many tokens must be generated before changing the draft size to avoid gpu thrashing
 
     std::vector<int32_t> correct_preds; // [n_seq] How many times did the target model accept all tokens of the draft per sequence
     std::vector<int32_t> wrong_preds; // [n_seq] How many times did the target model did not accept all tokens of the draft per sequence
     std::vector<int32_t> adaptive_n; // [n_seq] How many tokens should be predicted
+    std::vector<ring_buffer<int>> last_accepted; // [n_seq] saves the last N successes/failures
+    std::vector<int32_t> last_successes; // [n_seq] successes in the rolling window
+    std::vector<int32_t> last_failures; // [n_seq] failures in the rolling window
+    std::vector<int32_t> heuristic_token_counters; // [n_seq] tokens generated since last draft length change, per seq_id
 
     common_speculative_impl_draft_dflash(const common_params_speculative & params, uint32_t n_seq,
             common_speculative_type type = COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH)
@@ -1152,11 +1158,17 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
         llama_set_causal_attn(ctx_dft, false); // DFlash needs non-causal attention
 
+        adaptive_history_length = this->params.adaptive_history_length;
+        heuristic_variance_limit = this->params.adaptive_length_variance_limit;
         adaptive_length_threshold = this->params.adaptive_length_threshold;
         adaptive_length_bias = this->params.adaptive_length_bias;
         correct_preds.assign(n_seq,0);
         wrong_preds.assign(n_seq,0);
         adaptive_n.assign(n_seq, this->params.n_min);
+        last_accepted.assign(n_seq, ring_buffer<int>(adaptive_history_length));
+        last_failures.assign(n_seq, 0);
+        last_successes.assign(n_seq, 0);
+        heuristic_token_counters.assign(n_seq, 0);
     }
 
     ~common_speculative_impl_draft_dflash() override {
@@ -1433,43 +1445,124 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
     void accept(llama_seq_id seq_id, uint16_t n_accepted, bool /*is_other*/) override {
 
-        int32_t & seq_adaptive_n = adaptive_n[seq_id];
-        int32_t & correct_pred = correct_preds[seq_id];
-        int32_t & wrong_pred = wrong_preds[seq_id];
-
         if(adaptive_length_threshold > 0)
         {
-            LOG_DBG("Adaptive draft predicted %d/%d\n",n_accepted,adaptive_n[seq_id]);
+
+            int32_t & seq_adaptive_n = adaptive_n[seq_id];
+            int32_t & correct_pred = correct_preds[seq_id];
+            int32_t & wrong_pred = wrong_preds[seq_id];
+            int32_t & heuristic_token_counter = heuristic_token_counters[seq_id];
+
+            if(heuristic_token_counter > -1)
+            {
+                heuristic_token_counter += seq_adaptive_n;
+
+                if(heuristic_token_counter >= heuristic_variance_limit)
+                {
+                    heuristic_token_counter = -1;
+                }
+            }
+
+            int32_t rolling_counter_positive_zone = this->params.adaptive_length_positive_zone;
+            int32_t rolling_counter_negative_zone = this->params.adaptive_length_negative_zone;
+
+            LOG_DBG(" - seq_id %d, adaptive draft predicted %d/%d\n",seq_id, n_accepted,adaptive_n[seq_id]);
+
+            ring_buffer<int> & seq_id_last_preds = last_accepted[seq_id];
+            int & seq_last_successes = last_successes[seq_id];
+            int & seq_last_failures = last_failures[seq_id];
+
+            if (seq_id_last_preds.size() >= (size_t)adaptive_history_length) {
+                   const auto old = seq_id_last_preds.front();
+                   if(old == 0)
+                   {
+                       seq_last_failures--;
+                   }
+                   else
+                   {
+                       seq_last_successes--;
+                   }
+            }
 
             if(n_accepted >= seq_adaptive_n - adaptive_length_bias)
             {
-                correct_pred++;
-                wrong_pred = 0;
+                seq_id_last_preds.push_back(1);
+                seq_last_successes++;
+
             }
 
             else
             {
-                wrong_pred++;
-                correct_pred = 0;
+                seq_id_last_preds.push_back(0);
+                seq_last_failures++;
             }
 
-            if(correct_pred == adaptive_length_threshold)
-            {
-                if(seq_adaptive_n < params.n_max)
-                {
-                    seq_adaptive_n++;
-                }
-                correct_pred = 0;
-            }
+            bool in_positive_zone = seq_last_successes >= rolling_counter_positive_zone;
+            bool in_negative_zone = seq_last_failures >= rolling_counter_negative_zone;
 
-            else if(wrong_pred == adaptive_length_threshold)
+            if(in_positive_zone)
             {
-                if(seq_adaptive_n > params.n_min)
+                if(correct_pred < adaptive_length_threshold)
                 {
-                    seq_adaptive_n--;
+                    correct_pred++;
                 }
                 wrong_pred = 0;
+                LOG_DBG(" - seq_id %d, adaptive conscutives successes %d\n",seq_id, correct_pred);
             }
+            else if(in_negative_zone)
+            {
+                if(wrong_pred < adaptive_length_threshold)
+                {
+                    wrong_pred++;
+                }
+                correct_pred = 0;
+                LOG_DBG(" - seq_id %d, adaptive conscutives failures %d\n",seq_id, wrong_pred);
+            }
+            else
+            {
+                correct_pred = 0;
+                wrong_pred = 0;
+            }
+
+            LOG_DBG(" - seq_id %d, adaptive successs/failures %d/%d\n",seq_id, seq_last_successes,seq_last_failures);
+
+            if (heuristic_token_counter == -1)
+            {
+                if(correct_pred == adaptive_length_threshold)
+                {
+                    if(seq_adaptive_n < params.n_max)
+                    {
+                        seq_adaptive_n++;
+                        correct_pred = 0;
+                        wrong_pred = 0;
+                        seq_id_last_preds.clear();
+                        seq_last_successes = 0;
+                        seq_last_failures = 0;
+                        heuristic_token_counter = 0;
+                    }
+                }
+
+                else if(wrong_pred == adaptive_length_threshold)
+                {
+                    if(seq_adaptive_n > params.n_min)
+                    {
+                        seq_adaptive_n--;
+                        correct_pred = 0;
+                        wrong_pred = 0;
+                        seq_id_last_preds.clear();
+                        seq_last_successes = 0;
+                        seq_last_failures = 0;
+                        heuristic_token_counter = 0;
+                    }
+                }
+            }
+
+            else
+            {
+                LOG_DBG(" - seq_id %d, adaptive length allowed to change in %d tokens\n",seq_id, (heuristic_variance_limit - heuristic_token_counter));
+            }
+
+
         }
     }
 };
