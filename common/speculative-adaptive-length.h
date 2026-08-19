@@ -177,7 +177,7 @@ struct common_speculative_adaptive_length {
         , last_failures               (0)
     {}
 
-    // Reset mutable state after a length change (keeps config and n_cur intact).
+    // Reset mutable state after a length change.
     void reset_state() {
         correct_pred          = 0;
         wrong_pred            = 0;
@@ -203,7 +203,6 @@ struct common_speculative_adaptive_length {
 
         LOG_DBG(" - seq_id %d, adaptive draft predicted %d/%d\n", seq_id, n_accepted, n_cur);
 
-        // ---- rolling window: evict oldest if full ----
         if (last_accepted.size() >= adaptive_history_length) {
             const auto old = last_accepted.front();
             if (old == 0) {
@@ -213,7 +212,6 @@ struct common_speculative_adaptive_length {
             }
         }
 
-        // ---- record current verification result ----
         if (n_accepted >= n_cur - adaptive_length_bias) {
             last_accepted.push_back(1);
             last_successes++;
