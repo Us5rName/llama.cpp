@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <vector>
 
-// Simple bounded ring buffer for adaptive-length history tracking.
+// Simple bounded ring buffer for adaptive-length history tracking copied from common/sampling.cpp.
 template<typename T>
 struct ring_buffer {
     ring_buffer() : capacity(0), sz(0), first(0), pos(0) {}
@@ -82,11 +82,61 @@ struct ring_buffer {
     std::vector<T> data;
 };
 
-// Adaptive draft-length controller for speculative decoding.
+// Adaptive speculative draft-length heuristic.
 //
-// All configuration is copied from common_params_speculative_draft at
-// construction time.  The struct then owns both config and per-sequence
-// mutable state.
+// `n_cur` is the current draft length — the number of tokens the draft model
+// generates before the target model verifies them.
+//
+// May adjust `n_cur` by ±1 after each draft verification, bounded by `[n_min, n_max]`, based on recent
+// verification outcomes. The heuristic has four interacting components:
+//
+// 1. Rolling window  —  A ring buffer records the last N verification results as
+//    success (1) or failure (0). A step is a "success" if the number of accepted
+//    tokens is within `adaptive_length_bias` of the predicted length. As the window
+//    slides, the `last_successes` / `last_failures` counters are kept in sync.
+//
+// 2. Zones            —  The window counts determine which zone the heuristic is in:
+//    - Positive zone:  `last_successes >= positive_zone`  → draft model is performing well
+//    - Negative zone:  `last_failures  >= negative_zone`  → draft model is underperforming
+//    - Neutral:        neither threshold met              → uncertainty / mixed signal
+//
+//    Only in a zone does the heuristic accumulate evidence. In the positive zone it
+//    increments `correct_pred`; in the negative zone it increments `wrong_pred`. Being
+//    in the neutral zone resets both counters to zero. This prevents reacting to
+//    transient spikes.
+//
+// 3. Threshold         —  A length change fires only after `correct_pred` or `wrong_pred`
+//    reaches `adaptive_length_threshold`. This requires sustained evidence over multiple
+//    verification steps, not just a single good/bad round.
+//
+// 4. Cooldown          —  After a length change, all mutable state is reset and a
+//    cooldown is started. The `heuristic_token_counter` increments by `n_cur` each
+//    verification step until it reaches `heuristic_variance_limit`, at which point it
+//    is set to -1. This sentinel value means the cooldown has expired and a length
+//    change is now allowed. During cooldown (counter > -1), no length change can
+//    occur. This prevents rapid oscillation and gives the new length enough tokens
+//    to produce a stable signal before another adjustment.
+//
+// Flow per verification step:
+//   update() → advance cooldown → slide window → classify success/failure →
+//   determine zone → accumulate consecutive counter → if threshold met AND cooldown
+//   expired → adjust n_cur by ±1 → reset state.
+//
+// Example (parameters: n_min=2, n_max=12, n_cur=4, threshold=3,
+//   positive_zone=4, negative_zone=3, history_length=8, variance_limit=16, bias=1):
+//
+//   Step  n_cur  accepted  window              succ/fail  zone       corr/wrong       cool  action
+//   ----  -----  --------  ------------------  ---------  ---------  ---------------  ----  -------
+//   1       4       4      [1]                 1 / 0      neutral    0 / 0            4     cooldown
+//   2       4       4      [1,1]               2 / 0      neutral    0 / 0            8     cooldown
+//   3       4       4      [1,1,1]             3 / 0      neutral    0 / 0            12    cooldown
+//   4       4       4      [1,1,1,1]           4 / 0      positive   1 / 0            -1    — (cooldown expired)
+//   5       4       3      [1,1,1,1,1]         5 / 0      positive   2 / 0 (bias)     -1    —
+//   6       4       4      [1,1,1,1,1,1]       6 / 0      positive   3 / 0            -1    n_cur → 5
+//
+//   At step 6 the consecutive counter reaches the threshold and cooldown is already
+//   expired, so the draft length increases. All state resets; the next round of
+//   evidence is gathered with n_cur = 5.
 struct common_speculative_adaptive_length {
     // ---- config (copied from params in the constructor) ----
     int32_t  adaptive_length_threshold;
@@ -127,9 +177,8 @@ struct common_speculative_adaptive_length {
         , last_failures               (0)
     {}
 
-    // Reset mutable state to initial values (keeps config intact).
-    void init() {
-        n_cur                 = n_min;
+    // Reset mutable state after a length change (keeps config and n_cur intact).
+    void reset_state() {
         correct_pred          = 0;
         wrong_pred            = 0;
         heuristic_token_counter = 0;
@@ -202,12 +251,12 @@ struct common_speculative_adaptive_length {
             if (correct_pred == adaptive_length_threshold) {
                 if (n_cur < n_max) {
                     n_cur++;
-                    init();
+                    reset_state();
                 }
             } else if (wrong_pred == adaptive_length_threshold) {
                 if (n_cur > n_min) {
                     n_cur--;
-                    init();
+                    reset_state();
                 }
             }
         } else {
