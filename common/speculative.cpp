@@ -941,6 +941,13 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     const int32_t * target_layer_ids   = nullptr; // model_dft's extract layer indices
     uint32_t        target_layer_ids_n = 0;
 
+    int32_t adaptive_length_threshold; // Number of consecutive successes (failures) before increasing (decreasing) the size of the draft by one
+    int32_t adaptive_length_bias; // In adaptive length a success is defined as the target model accepting the (full draft - adaptive_length_bias tokens)
+
+    std::vector<int32_t> correct_preds; // [n_seq] How many times did the target model accept all tokens of the draft per sequence
+    std::vector<int32_t> wrong_preds; // [n_seq] How many times did the target model did not accept all tokens of the draft per sequence
+    std::vector<int32_t> adaptive_n; // [n_seq] How many tokens should be predicted
+
     common_speculative_impl_draft_dflash(const common_params_speculative & params, uint32_t n_seq,
             common_speculative_type type = COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH)
         : common_speculative_impl(type, n_seq, params.draft.n_max)
@@ -1050,6 +1057,15 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         // DFlash2 reads its selector lattice from h_nextn and never consumes raw logits.
         llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ !is_dflash2);
         llama_set_causal_attn(ctx_dft, causal_attn); // DFlash needs non-causal attention unless the model says otherwise
+        llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
+        llama_set_causal_attn(ctx_dft, false); // DFlash needs non-causal attention
+
+
+        adaptive_length_threshold = this->params.adaptive_length_threshold;
+        adaptive_length_bias = this->params.adaptive_length_bias;
+        correct_preds.assign(n_seq,0);
+        wrong_preds.assign(n_seq,0);
+        adaptive_n.assign(n_seq, this->params.n_min);
     }
 
     ~common_speculative_impl_draft_dflash() override {
@@ -1193,7 +1209,15 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
             const int32_t n = (int32_t) dp.n_past;
 
-            const int32_t n_draft = params.n_max;
+
+
+            int32_t n_draft = params.n_max;
+            if(adaptive_length_threshold > 0) {
+                n_draft = adaptive_n[seq_id];
+            }
+            if (dp.n_max > 0) {
+                n_draft = std::min(n_draft, dp.n_max);
+            }
 
             const int32_t n_block_tokens = n_draft + (is_dspark && sample_from_anchor ? 0 : 1);
             i_block_beg[seq_id] = batch.n_tokens;
@@ -1316,8 +1340,46 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         }
     }
 
-    void accept(llama_seq_id /*seq_id*/, uint16_t /*n_accepted*/, bool /*is_other*/) override {
-        // noop
+    void accept(llama_seq_id seq_id, uint16_t n_accepted, bool /*is_other*/) override {
+
+        int32_t & seq_adaptive_n = adaptive_n[seq_id];
+        int32_t & correct_pred = correct_preds[seq_id];
+        int32_t & wrong_pred = wrong_preds[seq_id];
+
+        if(adaptive_length_threshold > 0)
+        {
+            LOG_DBG("Adaptive draft predicted %d/%d\n",n_accepted,adaptive_n[seq_id]);
+
+            if(n_accepted >= seq_adaptive_n - adaptive_length_bias)
+            {
+                correct_pred++;
+                wrong_pred = 0;
+            }
+
+            else
+            {
+                wrong_pred++;
+                correct_pred = 0;
+            }
+
+            if(correct_pred == adaptive_length_threshold)
+            {
+                if(seq_adaptive_n < params.n_max)
+                {
+                    seq_adaptive_n++;
+                }
+                correct_pred = 0;
+            }
+
+            else if(wrong_pred == adaptive_length_threshold)
+            {
+                if(seq_adaptive_n > params.n_min)
+                {
+                    seq_adaptive_n--;
+                }
+                wrong_pred = 0;
+            }
+        }
     }
 };
 
