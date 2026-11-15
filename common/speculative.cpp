@@ -1011,6 +1011,8 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     // inject target features from the target's device buffer instead of host copies (env LLAMA_DFLASH_DEV=0 disables)
     bool use_dev_features = false;
 
+    std::vector<common_speculative_adaptive_length> adaptive_length_ctrl; // [n_seq] adaptive draft-length controller
+
     common_speculative_impl_draft_dflash(const common_params_speculative & params, uint32_t n_seq)
         : common_speculative_impl_draft_dflash(params, n_seq, COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH)
     {
@@ -1139,6 +1141,9 @@ protected:
 
         llama_set_embeddings_nextn(ctx_dft, true, opt.nextn_masked);
         llama_set_causal_attn(ctx_dft, causal_attn); // DFlash needs non-causal attention unless the model says otherwise
+
+        adaptive_length_ctrl.assign(n_seq,
+            common_speculative_adaptive_length(this->params));
     }
 
     // only LiliCorr uses this, to keep the context features for its scorer; the other heads only need the KV cache
@@ -1303,7 +1308,14 @@ public:
 
             const int32_t n = (int32_t) dp.pos0;
 
-            const int32_t n_draft = params.n_max;
+            int32_t n_draft = params.n_max;
+            if (adaptive_length_ctrl[seq_id].adaptive_length_threshold > 0) {
+                n_draft = adaptive_length_ctrl[seq_id].n_cur;
+            }
+            if (dp.n_max > 0) {
+                n_draft = std::min(n_draft, dp.n_max);
+            }
+
             const int32_t n_block_tokens = n_draft + 1;
             i_block_beg[seq_id] = batch.size();
             n_block    [seq_id] = n_block_tokens;
@@ -1365,8 +1377,8 @@ public:
         }
     }
 
-    void accept(llama_seq_id /*seq_id*/, uint16_t /*n_accepted*/, bool /*is_other*/) override {
-        // noop
+    void accept(llama_seq_id seq_id, uint16_t n_accepted, bool /*is_other*/) override {
+        adaptive_length_ctrl[seq_id].update(n_accepted, seq_id);
     }
 };
 
@@ -1428,7 +1440,14 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
 
             const int32_t n = (int32_t) dp.pos0;
 
-            const int32_t n_draft = params.n_max;
+            int32_t n_draft = params.n_max;
+            if (adaptive_length_ctrl[seq_id].adaptive_length_threshold > 0) {
+                n_draft = adaptive_length_ctrl[seq_id].n_cur;
+            }
+            if (dp.n_max > 0) {
+                n_draft = std::min(n_draft, dp.n_max);
+            }
+
             const int32_t n_block_tokens = n_draft + (sample_from_anchor ? 0 : 1);
             i_block_beg[seq_id] = batch.size();
             n_block    [seq_id] = n_block_tokens;
@@ -1549,7 +1568,14 @@ struct common_speculative_impl_draft_dflash2 final : public common_speculative_i
 
             const int32_t n = (int32_t) dp.pos0;
 
-            const int32_t n_draft = params.n_max;
+            int32_t n_draft = params.n_max;
+            if (adaptive_length_ctrl[seq_id].adaptive_length_threshold > 0) {
+                n_draft = adaptive_length_ctrl[seq_id].n_cur;
+            }
+            if (dp.n_max > 0) {
+                n_draft = std::min(n_draft, dp.n_max);
+            }
+
             const int32_t n_block_tokens = n_draft + 1;
             i_block_beg[seq_id] = batch.size();
             n_block    [seq_id] = n_block_tokens;
