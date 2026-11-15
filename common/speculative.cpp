@@ -9,6 +9,7 @@
 #include "ngram-map.h"
 #include "ngram-mod.h"
 #include "sampling.h"
+#include "speculative-adaptive-length.h"
 
 #include <algorithm>
 #include <cassert>
@@ -1827,6 +1828,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
     std::vector<int>                i_last;
     std::vector<std::vector<float>> chain_h;
+    std::vector<common_speculative_adaptive_length> adaptive_length_ctrl; // [n_seq] adaptive draft-length controller
 
     // target h rows on the device (llama_set_embeddings_nextn_dev): the catch-up in process() reads row k - 1 of the last
     // target decode in place, and row n_batch_tgt + seq_id for the first token of seq_id, uploaded from pending_h
@@ -1922,6 +1924,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             }
         }
         SPC_TRC("- target h rows on the device: %s\n", dev_rows ? "yes" : "no");
+
+        adaptive_length_ctrl.assign(n_seq,
+            common_speculative_adaptive_length(this->params));
     }
 
     ~common_speculative_impl_draft_mtp() override {
@@ -2219,6 +2224,16 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
                 result.push_back(id);
 
+                if(adaptive_length_ctrl[seq_id].adaptive_length_threshold > 0)
+                {
+                    //TODO: make the adaptive length work when draft length is 0. The problem is that accept isn't called when the draft is empty, so need to find a way to work around it.
+                    if (adaptive_length_ctrl[seq_id].n_cur <= (int) result.size()) {
+                        drafting[seq_id] = false;
+                        n_drafting--;
+                        continue;
+                    }
+                }
+
                 if (dp.result_q) {
                     dp.result_q->emplace_back(cur_p->data, cur_p->data + cur_p->size);
                 }
@@ -2285,6 +2300,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         if (n_rows <= 0) {
             return;
         }
+
+        adaptive_length_ctrl[seq_id].update(n_accepted, seq_id);
 
         const int32_t i_h = std::min<int32_t>(n_accepted, n_rows - 1);
         if (dev_rows) {
